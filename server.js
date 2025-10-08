@@ -1,5 +1,6 @@
 // TagSoft API — Fastify (robusta p/ MVP)
-// Rotas: / (hint), /v1/health, /v1/ingest (POST), /v1/containers (GET/PUT), /v1/analytics/overview (GET), /v1/analysis/chat (POST)
+// Rotas: / (hint), /v1/health, /v1/ingest (POST), /v1/containers (GET/PUT),
+//        /v1/analytics/overview (GET), /v1/analysis/chat (POST)
 
 const fastify = require('fastify')({ logger: true });
 const cors = require('@fastify/cors');
@@ -13,19 +14,11 @@ const db = {
   containers: new Map(),
 };
 
-// CORS amplo para MVP (permite front no Vercel)
+// —— CORS (não precisa de handler manual de OPTIONS) ——
 fastify.register(cors, {
-  origin: true,
+  origin: true, // reflete qualquer Origin (Vercel, etc.)
   methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
   allowedHeaders: ['content-type', 'x-api-key'],
-});
-
-// Opcional: OPTIONS catch-all (alguns proxies gostam disso)
-fastify.options('/*', async (req, reply) => {
-  reply
-    .header('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS')
-    .header('Access-Control-Allow-Headers', 'content-type,x-api-key')
-    .send();
 });
 
 // —— Helpers ——
@@ -44,8 +37,17 @@ function mask(k) {
 // —— Rotas amigáveis/diagnóstico ——
 fastify.all('/', async () => ({
   ok: true,
-  hint: 'Use POST /v1/ingest para enviar eventos. Health em GET /v1/health. Listagem de containers em GET /v1/containers.',
-  docs: ['/v1/health', 'POST /v1/ingest', 'GET /v1/containers', 'PUT /v1/containers', 'GET /v1/analytics/overview', 'POST /v1/analysis/chat'],
+  hint:
+    'Use POST /v1/ingest para enviar eventos. Health em GET /v1/health. ' +
+    'Listagem de containers em GET /v1/containers.',
+  docs: [
+    '/v1/health',
+    'POST /v1/ingest',
+    'GET /v1/containers',
+    'PUT /v1/containers',
+    'GET /v1/analytics/overview',
+    'POST /v1/analysis/chat',
+  ],
 }));
 
 fastify.get('/v1', async () => ({
@@ -68,18 +70,20 @@ fastify.get('/v1/ingest', async () => ({
   ok: false,
   hint: 'Use POST /v1/ingest com JSON e header x-api-key.',
   example: {
-    curl: "curl -X POST https://SUA-API.../v1/ingest -H 'content-type: application/json' -H 'x-api-key: DEMO_KEY' -d '{\"event\":\"page_view\",\"user\":{\"id\":\"u1\"}}'",
+    curl:
+      "curl -X POST https://SUA-API.../v1/ingest " +
+      "-H 'content-type: application/json' -H 'x-api-key: DEMO_KEY' " +
+      "-d '{\"event\":\"page_view\",\"user\":{\"id\":\"u1\"}}'",
   },
 }));
 
-// —— API de verdade ——
+// —— API principal ——
 
 // Ingest: recebe eventos
 fastify.post('/v1/ingest', async (req, reply) => {
   try {
     assertAuth(req);
     const body = req.body || {};
-    // validações mínimas
     const eventName = String(body.event || '').trim();
     if (!eventName) return reply.code(400).send({ error: 'campo obrigatório: event' });
 
@@ -125,7 +129,7 @@ fastify.put('/v1/containers', async (req, reply) => {
 fastify.get('/v1/analytics/overview', async (req, reply) => {
   try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
   const now = Date.now();
-  const last24h = db.events.filter(e => now - Date.parse(e.ts) < 24*3600*1000).length;
+  const last24h = db.events.filter(e => now - Date.parse(e.ts) < 24 * 3600 * 1000).length;
   const by_event = db.events.reduce((acc, e) => { acc[e.event] = (acc[e.event] || 0) + 1; return acc; }, {});
   return { total_events: db.events.length, last24h, by_event };
 });
