@@ -14,11 +14,14 @@ const db = {
   containers: new Map(),
 };
 
-// —— CORS (não precisa de handler manual de OPTIONS) ——
+// —— CORS (agora com credentials: true) ——
 fastify.register(cors, {
-  origin: true, // reflete qualquer Origin (Vercel, etc.)
+  origin: true,                                 // reflete o Origin do front (Vercel)
   methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
   allowedHeaders: ['content-type', 'x-api-key'],
+  credentials: true,                             // <—— IMPORTANTE p/ preflight com credentials
+  // opcional: cache do preflight por 1h
+  // maxAge: 3600,
 });
 
 // —— Helpers ——
