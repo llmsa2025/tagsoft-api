@@ -1,6 +1,11 @@
 // TagSoft API — Fastify (robusta p/ MVP)
-// Rotas: / (hint), /v1/health, /v1/ingest (POST), /v1/containers (GET/PUT),
-//        /v1/analytics/overview (GET), /v1/analysis/chat (POST)
+// Rotas principais agora incluem Contas e Containers:
+// - / (hint), /v1/health
+// - /v1/accounts (GET/PUT), /v1/accounts/:id (GET)
+// - /v1/containers (GET/PUT), /v1/containers/:id (GET)
+// - /v1/ingest (POST)
+// - /v1/analytics/overview (GET)
+// - /v1/analysis/chat (POST)
 
 const fastify = require('fastify')({ logger: true });
 const cors = require('@fastify/cors');
@@ -11,17 +16,17 @@ const API_KEY = process.env.API_KEY || 'DEMO_KEY';
 // DB em memória (MVP). Depois trocamos por Supabase/ClickHouse.
 const db = {
   events: [],
+  accounts: new Map(),     // <— NOVO: armazenamento de contas
   containers: new Map(),
 };
 
-// —— CORS (agora com credentials: true) ——
+// —— CORS (com credentials: true) ——
 fastify.register(cors, {
   origin: true,                                 // reflete o Origin do front (Vercel)
   methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
   allowedHeaders: ['content-type', 'x-api-key'],
-  credentials: true,                             // <—— IMPORTANTE p/ preflight com credentials
-  // opcional: cache do preflight por 1h
-  // maxAge: 3600,
+  credentials: true,                             // necessário para requests com credentials
+  // maxAge: 3600, // opcional: cache de preflight por 1h
 });
 
 // —— Helpers ——
@@ -42,12 +47,16 @@ fastify.all('/', async () => ({
   ok: true,
   hint:
     'Use POST /v1/ingest para enviar eventos. Health em GET /v1/health. ' +
-    'Listagem de containers em GET /v1/containers.',
+    'Contas em GET/PUT /v1/accounts. Containers em GET/PUT /v1/containers.',
   docs: [
     '/v1/health',
-    'POST /v1/ingest',
+    'GET /v1/accounts',
+    'PUT /v1/accounts',
+    'GET /v1/accounts/:id',
     'GET /v1/containers',
     'PUT /v1/containers',
+    'GET /v1/containers/:id',
+    'POST /v1/ingest',
     'GET /v1/analytics/overview',
     'POST /v1/analysis/chat',
   ],
@@ -58,9 +67,13 @@ fastify.get('/v1', async () => ({
   version: 1,
   endpoints: {
     health: 'GET /v1/health',
-    ingest: 'POST /v1/ingest',
+    accounts_list: 'GET /v1/accounts',
+    accounts_upsert: 'PUT /v1/accounts',
+    account_get: 'GET /v1/accounts/:id',
     containers_list: 'GET /v1/containers',
     containers_upsert: 'PUT /v1/containers',
+    container_get: 'GET /v1/containers/:id',
+    ingest: 'POST /v1/ingest',
     analytics: 'GET /v1/analytics/overview',
     analysis_chat: 'POST /v1/analysis/chat',
   },
@@ -80,9 +93,45 @@ fastify.get('/v1/ingest', async () => ({
   },
 }));
 
-// —— API principal ——
+// ======================================================================
+// =                               ACCOUNTS                              =
+// ======================================================================
 
-// Ingest: recebe eventos
+// Listar contas
+fastify.get('/v1/accounts', async (req, reply) => {
+  try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
+  return Array.from(db.accounts.values());
+});
+
+// Ler uma conta específica
+fastify.get('/v1/accounts/:id', async (req, reply) => {
+  try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
+  const acc = db.accounts.get(req.params.id);
+  if (!acc) return reply.code(404).send({ error: 'not_found' });
+  return acc;
+});
+
+// Criar/atualizar conta
+fastify.put('/v1/accounts', async (req, reply) => {
+  try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
+  const body = req.body || {};
+  if (!body.account_id) return reply.code(400).send({ error: 'account_id required' });
+  if (!body.name) return reply.code(400).send({ error: 'name required' });
+
+  const acc = {
+    account_id: String(body.account_id),
+    name: String(body.name),
+    created_at: new Date().toISOString(),
+  };
+  db.accounts.set(acc.account_id, acc);
+  return { ok: true, account_id: acc.account_id };
+});
+
+// ======================================================================
+// =                              CONTAINERS                             =
+// ======================================================================
+
+// Ingest: recebe eventos (mantido)
 fastify.post('/v1/ingest', async (req, reply) => {
   try {
     assertAuth(req);
@@ -105,12 +154,15 @@ fastify.post('/v1/ingest', async (req, reply) => {
   }
 });
 
-// Containers
+// Listar containers (pode filtrar por account_id)
 fastify.get('/v1/containers', async (req, reply) => {
   try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
-  return Array.from(db.containers.values());
+  const list = Array.from(db.containers.values());
+  const aid = req.query && req.query.account_id ? String(req.query.account_id) : null;
+  return aid ? list.filter(c => c.account_id === aid) : list;
 });
 
+// Ler um container
 fastify.get('/v1/containers/:id', async (req, reply) => {
   try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
   const c = db.containers.get(req.params.id);
@@ -118,17 +170,34 @@ fastify.get('/v1/containers/:id', async (req, reply) => {
   return c;
 });
 
+// Criar/atualizar container (agora requer account_id e type web/server)
 fastify.put('/v1/containers', async (req, reply) => {
   try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
   const c = req.body || {};
+
   if (!c.container_id) return reply.code(400).send({ error: 'container_id required' });
   if (!c.name) return reply.code(400).send({ error: 'name required' });
-  c.version = Number(c.version || 1);
+  if (!c.account_id) return reply.code(400).send({ error: 'account_id required' });
+  if (!db.accounts.has(String(c.account_id))) return reply.code(400).send({ error: 'unknown account_id' });
+
+  const type = String(c.type || 'web'); // 'web' | 'server'
+  if (!['web','server'].includes(type)) return reply.code(400).send({ error: 'invalid type' });
+
+  // Normalização de campos opcionais
+  c.version   = Number(c.version || 1);
+  c.type      = type;
+  c.variables = Array.isArray(c.variables) ? c.variables : [];
+  c.triggers  = Array.isArray(c.triggers)  ? c.triggers  : [];
+  c.tags      = Array.isArray(c.tags)      ? c.tags      : [];
+
   db.containers.set(c.container_id, c);
   return { ok: true, container_id: c.container_id };
 });
 
-// Analytics básico
+// ======================================================================
+// =                              ANALYTICS                              =
+// ======================================================================
+
 fastify.get('/v1/analytics/overview', async (req, reply) => {
   try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
   const now = Date.now();
