@@ -1,11 +1,6 @@
-// TagSoft API — Fastify (robusta p/ MVP)
-// Rotas principais agora incluem Contas e Containers:
-// - / (hint), /v1/health
-// - /v1/accounts (GET/PUT), /v1/accounts/:id (GET)
-// - /v1/containers (GET/PUT), /v1/containers/:id (GET)
-// - /v1/ingest (POST)
-// - /v1/analytics/overview (GET)
-// - /v1/analysis/chat (POST)
+// TagSoft API — Fastify (MVP)
+// Rotas: / (hint), /v1/health, /v1/accounts (GET/PUT), /v1/containers (GET/PUT)
+//        /v1/analytics/overview (GET), /v1/ingest (POST), /v1/analysis/chat (POST)
 
 const fastify = require('fastify')({ logger: true });
 const cors = require('@fastify/cors');
@@ -13,20 +8,19 @@ const { randomUUID } = require('crypto');
 
 const API_KEY = process.env.API_KEY || 'DEMO_KEY';
 
-// DB em memória (MVP). Depois trocamos por Supabase/ClickHouse.
+// —— DB em memória (MVP). Depois trocamos por Supabase/ClickHouse. ——
 const db = {
   events: [],
-  accounts: new Map(),     // <— NOVO: armazenamento de contas
-  containers: new Map(),
+  accounts: new Map(),    // { account_id, name, meta, createdAt, updatedAt }
+  containers: new Map(),  // { container_id, account_id, type, name, version, meta, createdAt, updatedAt }
 };
 
 // —— CORS (com credentials: true) ——
 fastify.register(cors, {
-  origin: true,                                 // reflete o Origin do front (Vercel)
+  origin: true,
   methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
   allowedHeaders: ['content-type', 'x-api-key'],
-  credentials: true,                             // necessário para requests com credentials
-  // maxAge: 3600, // opcional: cache de preflight por 1h
+  credentials: true,
 });
 
 // —— Helpers ——
@@ -41,22 +35,33 @@ function mask(k) {
   if (!k) return '';
   return k.length <= 6 ? '*'.repeat(k.length) : `${k.slice(0,3)}…${k.slice(-3)}`;
 }
+function slugify(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '');
+}
+function genId(prefix, name, existsFn) {
+  const base = slugify(name) || 'item';
+  let id;
+  do {
+    const rand = Math.random().toString(36).slice(2, 6);
+    id = `${prefix}_${base}_${rand}`;
+  } while (existsFn && existsFn(id));
+  return id;
+}
 
 // —— Rotas amigáveis/diagnóstico ——
 fastify.all('/', async () => ({
   ok: true,
-  hint:
-    'Use POST /v1/ingest para enviar eventos. Health em GET /v1/health. ' +
-    'Contas em GET/PUT /v1/accounts. Containers em GET/PUT /v1/containers.',
+  hint: 'Use POST /v1/ingest para enviar eventos. Health em GET /v1/health.',
   docs: [
     '/v1/health',
     'GET /v1/accounts',
     'PUT /v1/accounts',
-    'GET /v1/accounts/:id',
-    'GET /v1/containers',
+    'GET /v1/containers?account_id=...',
     'PUT /v1/containers',
-    'GET /v1/containers/:id',
-    'POST /v1/ingest',
     'GET /v1/analytics/overview',
     'POST /v1/analysis/chat',
   ],
@@ -69,10 +74,8 @@ fastify.get('/v1', async () => ({
     health: 'GET /v1/health',
     accounts_list: 'GET /v1/accounts',
     accounts_upsert: 'PUT /v1/accounts',
-    account_get: 'GET /v1/accounts/:id',
-    containers_list: 'GET /v1/containers',
+    containers_list: 'GET /v1/containers?account_id=...',
     containers_upsert: 'PUT /v1/containers',
-    container_get: 'GET /v1/containers/:id',
     ingest: 'POST /v1/ingest',
     analytics: 'GET /v1/analytics/overview',
     analysis_chat: 'POST /v1/analysis/chat',
@@ -81,21 +84,7 @@ fastify.get('/v1', async () => ({
 
 fastify.get('/v1/health', async () => ({ ok: true }));
 
-// Mensagem educativa se alguém fizer GET em /v1/ingest
-fastify.get('/v1/ingest', async () => ({
-  ok: false,
-  hint: 'Use POST /v1/ingest com JSON e header x-api-key.',
-  example: {
-    curl:
-      "curl -X POST https://SUA-API.../v1/ingest " +
-      "-H 'content-type: application/json' -H 'x-api-key: DEMO_KEY' " +
-      "-d '{\"event\":\"page_view\",\"user\":{\"id\":\"u1\"}}'",
-  },
-}));
-
-// ======================================================================
-// =                               ACCOUNTS                              =
-// ======================================================================
+// —— Accounts ——
 
 // Listar contas
 fastify.get('/v1/accounts', async (req, reply) => {
@@ -103,35 +92,91 @@ fastify.get('/v1/accounts', async (req, reply) => {
   return Array.from(db.accounts.values());
 });
 
-// Ler uma conta específica
+// Obter conta por id
 fastify.get('/v1/accounts/:id', async (req, reply) => {
   try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
   const acc = db.accounts.get(req.params.id);
-  if (!acc) return reply.code(404).send({ error: 'not_found' });
+  if (!acc) return reply.code(404).send({ error: 'not found' });
   return acc;
 });
 
-// Criar/atualizar conta
+// Criar/atualizar conta (gera account_id se não vier)
 fastify.put('/v1/accounts', async (req, reply) => {
   try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
-  const body = req.body || {};
-  if (!body.account_id) return reply.code(400).send({ error: 'account_id required' });
-  if (!body.name) return reply.code(400).send({ error: 'name required' });
 
-  const acc = {
-    account_id: String(body.account_id),
-    name: String(body.name),
-    created_at: new Date().toISOString(),
-  };
-  db.accounts.set(acc.account_id, acc);
-  return { ok: true, account_id: acc.account_id };
+  const body = req.body || {};
+  let { account_id, name, meta = {} } = body;
+
+  if (!name || !String(name).trim()) {
+    return reply.code(400).send({ error: 'name required' });
+  }
+
+  if (!account_id) {
+    account_id = genId('ac', name, (id) => db.accounts.has(id));
+  }
+
+  const now = new Date().toISOString();
+  const existing = db.accounts.get(account_id);
+  const acc = existing
+    ? { ...existing, name, meta, updatedAt: now }
+    : { account_id, name, meta, createdAt: now, updatedAt: now };
+
+  db.accounts.set(account_id, acc);
+  return { ok: true, account_id, account: acc };
 });
 
-// ======================================================================
-// =                              CONTAINERS                             =
-// ======================================================================
+// —— Containers ——
 
-// Ingest: recebe eventos (mantido)
+// Listar containers (com filtro opcional por account_id)
+fastify.get('/v1/containers', async (req, reply) => {
+  try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
+  const { account_id } = req.query || {};
+  const all = Array.from(db.containers.values());
+  const filtered = account_id ? all.filter(c => c.account_id === account_id) : all;
+  return filtered;
+});
+
+// Obter container por id
+fastify.get('/v1/containers/:id', async (req, reply) => {
+  try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
+  const c = db.containers.get(req.params.id);
+  if (!c) return reply.code(404).send({ error: 'not found' });
+  return c;
+});
+
+// Criar/atualizar container (gera container_id se não vier)
+fastify.put('/v1/containers', async (req, reply) => {
+  try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
+
+  const c = req.body || {};
+  // Regras mínimas
+  if (!c.name) return reply.code(400).send({ error: 'name required' });
+  if (!c.account_id) return reply.code(400).send({ error: 'account_id required' });
+  if (!db.accounts.has(c.account_id)) return reply.code(400).send({ error: 'account not found' });
+
+  // Tipo do container (ex.: 'web' | 'server')
+  const type = String(c.type || '').toLowerCase();
+  if (!type || !['web', 'server'].includes(type)) {
+    return reply.code(400).send({ error: "type required ('web' or 'server')" });
+  }
+
+  // Gera ID, se necessário
+  if (!c.container_id) {
+    c.container_id = genId('ct', c.name, (id) => db.containers.has(id));
+  }
+
+  c.version = Number(c.version || 1);
+  const now = new Date().toISOString();
+  const existing = db.containers.get(c.container_id);
+  const merged = existing
+    ? { ...existing, ...c, type, updatedAt: now }
+    : { ...c, type, createdAt: now, updatedAt: now };
+
+  db.containers.set(c.container_id, merged);
+  return { ok: true, container_id: c.container_id, container: merged };
+});
+
+// —— Ingest: recebe eventos ——
 fastify.post('/v1/ingest', async (req, reply) => {
   try {
     assertAuth(req);
@@ -154,50 +199,7 @@ fastify.post('/v1/ingest', async (req, reply) => {
   }
 });
 
-// Listar containers (pode filtrar por account_id)
-fastify.get('/v1/containers', async (req, reply) => {
-  try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
-  const list = Array.from(db.containers.values());
-  const aid = req.query && req.query.account_id ? String(req.query.account_id) : null;
-  return aid ? list.filter(c => c.account_id === aid) : list;
-});
-
-// Ler um container
-fastify.get('/v1/containers/:id', async (req, reply) => {
-  try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
-  const c = db.containers.get(req.params.id);
-  if (!c) return reply.code(404).send({ error: 'not found' });
-  return c;
-});
-
-// Criar/atualizar container (agora requer account_id e type web/server)
-fastify.put('/v1/containers', async (req, reply) => {
-  try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
-  const c = req.body || {};
-
-  if (!c.container_id) return reply.code(400).send({ error: 'container_id required' });
-  if (!c.name) return reply.code(400).send({ error: 'name required' });
-  if (!c.account_id) return reply.code(400).send({ error: 'account_id required' });
-  if (!db.accounts.has(String(c.account_id))) return reply.code(400).send({ error: 'unknown account_id' });
-
-  const type = String(c.type || 'web'); // 'web' | 'server'
-  if (!['web','server'].includes(type)) return reply.code(400).send({ error: 'invalid type' });
-
-  // Normalização de campos opcionais
-  c.version   = Number(c.version || 1);
-  c.type      = type;
-  c.variables = Array.isArray(c.variables) ? c.variables : [];
-  c.triggers  = Array.isArray(c.triggers)  ? c.triggers  : [];
-  c.tags      = Array.isArray(c.tags)      ? c.tags      : [];
-
-  db.containers.set(c.container_id, c);
-  return { ok: true, container_id: c.container_id };
-});
-
-// ======================================================================
-// =                              ANALYTICS                              =
-// ======================================================================
-
+// —— Analytics básico ——
 fastify.get('/v1/analytics/overview', async (req, reply) => {
   try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
   const now = Date.now();
@@ -206,19 +208,17 @@ fastify.get('/v1/analytics/overview', async (req, reply) => {
   return { total_events: db.events.length, last24h, by_event };
 });
 
-// Chat analysis (stub)
+// —— Chat analysis (stub) ——
 fastify.post('/v1/analysis/chat', async (req, reply) => {
   try { assertAuth(req); } catch (e) { return reply.code(401).send({ error: e.message }); }
   const prompt = (req.body && req.body.prompt) || '';
   const top = Object.entries(
     db.events.reduce((a, e) => { a[e.event] = (a[e.event] || 0) + 1; return a; }, {})
-  ).sort((a,b) => b[1]-a[1])[0];
-  return { answer: `Análise inicial: evento mais frequente é '${top?.[0]||'n/a'}' com ${top?.[1]||0} ocorrências. Pergunta: ${prompt}` };
+  ).sort((a,b) => b[1] - a[1])[0];
+  return { answer: `Análise inicial: evento mais frequente é '${top?.[0] || 'n/a'}' com ${top?.[1] || 0} ocorrências. Pergunta: ${prompt}` };
 });
 
 // —— Not Found & Error Handlers ——
-
-// 404 amigável
 fastify.setNotFoundHandler((req, reply) => {
   const m = req.method.toUpperCase();
   const p = req.url;
@@ -229,7 +229,6 @@ fastify.setNotFoundHandler((req, reply) => {
   reply.code(404).send({ error: 'not_found', method: m, path: p, hint });
 });
 
-// Erros padronizados
 fastify.setErrorHandler((err, req, reply) => {
   const code = err.statusCode && Number.isInteger(err.statusCode) ? err.statusCode : 500;
   reply.code(code).send({ error: err.message || 'internal_error' });
